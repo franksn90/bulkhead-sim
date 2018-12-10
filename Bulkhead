@@ -1,0 +1,168 @@
+dtmc
+
+// MATHS
+const double e = 2.71828182846;
+
+
+// OPTIMIZATION PARAMETERS
+const int THREADPOOLSIZEA;
+const int THREADPOOLSIZEB;
+const int TIMEOUTA;
+const int TIMEOUTB;
+
+// SCENARIO CONSTANTS
+const int SIMULATION_LENGTH_IN_MICROSECONDS = 1000;
+const int TOTALTHREADNUMBER = THREADPOOLSIZEA+THREADPOOLSIZEB;
+
+// HARDWARE SPECIFICATION
+const int CORES_OF_SERVER = 1;
+const int MAX_AVAILABLE_DEMAND_PERCENT = 100 * CORES_OF_SERVER;
+const double MEAN_ARRIVAL_INTERVALL_A = 1;
+const double MEAN_ARRIVAL_INTERVALL_B = 10000;
+const double MANY_THREADS_PENALTY = 0.99;
+
+// REQUEST SPECIFICATION
+const int DEMAND_PERCENT_A = 30; // 100 is full CPU
+const int DEMAND_PERCENT_B = 45; // 100 is full CPU
+const int BASE_PROCESSING_TIME_MICROSECOND_A = 1;
+const int BASE_PROCESSING_TIME_MICROSECOND_B = 20;
+const double EASY_TASK_PROBABILITY_A = 0.1;
+const double EASY_TASK_PROBABILITY_B = 0.1;
+const double EASY_TASK_MODIFIER_A = 0.5;
+const double EASY_TASK_MODIFIER_B = 0.5;
+const double DIFFICULT_TASK_PROBABILITY_A = 0.05;
+const double DIFFICULT_TASK_PROBABILITY_B = 0.05;
+const double DIFFICULT_TASK_MODIFIER_A = 3.0;
+const double DIFFICULT_TASK_MODIFIER_B = 3.0;
+
+
+global activeThreadsA : [0..THREADPOOLSIZEA] init 0;
+global activeThreadsB : [0..THREADPOOLSIZEB] init 0;
+global total_demand_percent : [0..TOTALTHREADNUMBER*100] init 0;
+
+const int MAX_QUEUE_LENGTH_A = 10;
+const int MAX_QUEUE_LENGTH_B = 10;
+
+global CURRENT_QUEUE_LENGTH_A : [0..MAX_QUEUE_LENGTH_A] init 0;
+global CURRENT_QUEUE_LENGTH_B : [0..MAX_QUEUE_LENGTH_B] init 0;
+global THREAD_TOOK_INPUT_A : bool init false;
+global THREAD_TOOK_INPUT_B : bool init false;
+
+global requestFinishedA : [-1..SIMULATION_LENGTH_IN_MICROSECONDS] init -1;
+global requestFinishedB : [-1..SIMULATION_LENGTH_IN_MICROSECONDS] init -1;
+
+// TIMER
+module SimulationTimer // TODO
+time : [0..SIMULATION_LENGTH_IN_MICROSECONDS] init 0;// change to 0
+
+[endRound] time <= SIMULATION_LENGTH_IN_MICROSECONDS & !(CURRENT_QUEUE_LENGTH_A > 0 & THREADPOOLSIZEA > activeThreadsA) & !(CURRENT_QUEUE_LENGTH_B > 0 & THREADPOOLSIZEB > activeThreadsB) -> (time' = time + 1);
+endmodule
+
+// METRICS
+module SimulationStatistics_A // TODO
+metric_rejected_A : [0..SIMULATION_LENGTH_IN_MICROSECONDS] init 0;
+metric_timeout_A : [0..SIMULATION_LENGTH_IN_MICROSECONDS] init 0;
+metric_successfull_number_A : [0..SIMULATION_LENGTH_IN_MICROSECONDS] init 0;
+metric_successfull_time_A : [0..SIMULATION_LENGTH_IN_MICROSECONDS*SIMULATION_LENGTH_IN_MICROSECONDS] init 0;
+
+[requestA_reject] (THREADPOOLSIZEA - activeThreadsA) = 0 & CURRENT_QUEUE_LENGTH_A = MAX_QUEUE_LENGTH_A & tp_requestA != -1 -> (metric_rejected_A' = metric_rejected_A +1);
+[] requestFinishedA != -1 & (time - requestFinishedA) < TIMEOUTA ->   (metric_successfull_number_A' = metric_successfull_number_A + 1)&(metric_successfull_time_A' = metric_successfull_time_A + time - requestFinishedA) & (requestFinishedA'=-1);
+[] requestFinishedA != -1 & (time - requestFinishedA) >= TIMEOUTA -> (metric_timeout_A' = metric_timeout_A + 1)&(requestFinishedA'=-1);
+[endRound] requestFinishedA = -1 -> true;
+endmodule
+
+// ARRIVAL RATES
+module SimulationDriverA
+sd_finished_A : bool init false;
+
+sd_requestA : [-1..SIMULATION_LENGTH_IN_MICROSECONDS] init -1;
+
+// Generate or not, Poisson Process
+[] sd_finished_A = false -> (1-pow(e,-1/MEAN_ARRIVAL_INTERVALL_A)) : (sd_requestA' = time)&(sd_finished_A' = true) + (pow(e,-1/MEAN_ARRIVAL_INTERVALL_A)) : (sd_finished_A' = true);
+
+[overtakeThreadPoolA] true -> (sd_requestA' = -1);
+[endRound] sd_finished_A & sd_requestA = -1 = true -> (sd_finished_A' = false);
+endmodule
+
+module SimulationDriverB = SimulationDriverA [sd_finished_A = sd_finished_B, sd_requestA = sd_requestB, overtakeThreadPoolA = overtakeThreadPoolB, MEAN_ARRIVAL_INTERVALL_A = MEAN_ARRIVAL_INTERVALL_B] endmodule 
+
+
+// QUEUEING
+module ThreadPoolA
+tp_requestA : [-1..SIMULATION_LENGTH_IN_MICROSECONDS] init -1;
+
+[overtakeThreadPoolA] sd_requestA = time -> (tp_requestA' = sd_requestA);
+[overtakeQueueA] true -> (tp_requestA' = -1);
+[requestA_reject] true -> (tp_requestA' = -1);
+[endRound] tp_requestA = -1  -> true;
+endmodule
+
+module ThreadPoolB = ThreadPoolA [tp_requestA = tp_requestB, sd_requestA = sd_requestB, overtakeThreadPoolA = overtakeThreadPoolB] endmodule
+
+
+module Queue_A_IN
+qain_request : [-1..SIMULATION_LENGTH_IN_MICROSECONDS] init -1;
+qain_handleNewRequest : bool init false;
+
+[overtakeQueueA] qain_request = -1 & tp_requestA != -1 -> (qain_request'=tp_requestA) & (qain_handleNewRequest' = true);
+[] qain_handleNewRequest = true -> (CURRENT_QUEUE_LENGTH_A' = CURRENT_QUEUE_LENGTH_A + 1) & (qain_handleNewRequest' = false);
+[overtakeQueuePreviousA_2] !qain_handleNewRequest -> (qain_request' = -1);
+[endRound] !qain_handleNewRequest -> true;
+endmodule
+
+
+module Queue_A_2
+qa2_request : [-1..SIMULATION_LENGTH_IN_MICROSECONDS] init -1;
+
+[overtakeQueuePreviousA_2] qa2_request = -1 & qain_request != -1 & CURRENT_QUEUE_LENGTH_A > 0  -> (qa2_request' = qain_request); // I pull the next value
+[overtakeQueuePreviousA_3] qa2_request != -1 -> (qa2_request' = -1); // Previous one pulled the next value
+[endRound] CURRENT_QUEUE_LENGTH_A = 0 | qa2_request != -1 | (qa2_request = -1 & qain_request = -1)  -> true; 
+endmodule
+
+module Queue_A_3 = Queue_A_2 [qa2_request = qa3_request, qain_request = qa2_request, overtakeQueuePreviousA_2 = overtakeQueuePreviousA_3, overtakeQueuePreviousA_3 = overtakeQueuePreviousA_4] endmodule
+module Queue_A_4 = Queue_A_2 [qa2_request = qa4_request, qain_request = qa3_request, overtakeQueuePreviousA_2 = overtakeQueuePreviousA_4, overtakeQueuePreviousA_3 = overtakeQueuePreviousA_5] endmodule
+module Queue_A_5 = Queue_A_2 [qa2_request = qa5_request, qain_request = qa4_request, overtakeQueuePreviousA_2 = overtakeQueuePreviousA_5, overtakeQueuePreviousA_3 = overtakeQueuePreviousA_6] endmodule
+module Queue_A_6 = Queue_A_2 [qa2_request = qa6_request, qain_request = qa5_request, overtakeQueuePreviousA_2 = overtakeQueuePreviousA_6, overtakeQueuePreviousA_3 = overtakeQueuePreviousA_7] endmodule
+module Queue_A_7 = Queue_A_2 [qa2_request = qa7_request, qain_request = qa6_request, overtakeQueuePreviousA_2 = overtakeQueuePreviousA_7, overtakeQueuePreviousA_3 = overtakeQueuePreviousA_8] endmodule
+module Queue_A_8 = Queue_A_2 [qa2_request = qa8_request, qain_request = qa7_request, overtakeQueuePreviousA_2 = overtakeQueuePreviousA_8, overtakeQueuePreviousA_3 = overtakeQueuePreviousA_9] endmodule
+module Queue_A_9 = Queue_A_2 [qa2_request = qa9_request, qain_request = qa8_request, overtakeQueuePreviousA_2 = overtakeQueuePreviousA_9, overtakeQueuePreviousA_3 = overtakeQueuePreviousA_out] endmodule
+
+module Queue_A_out
+qaout_request : [-1..SIMULATION_LENGTH_IN_MICROSECONDS] init -1;
+
+[overtakeQueuePreviousA_out] qaout_request = -1 & qa9_request != -1 & CURRENT_QUEUE_LENGTH_A > 0  -> (qaout_request' = qa9_request); // I pull the next value
+[] THREAD_TOOK_INPUT_A -> (qaout_request' = -1) & (THREAD_TOOK_INPUT_A' = false) & (CURRENT_QUEUE_LENGTH_A' = CURRENT_QUEUE_LENGTH_A -1);
+[endRound] !THREAD_TOOK_INPUT_A & !(CURRENT_QUEUE_LENGTH_A > 0 & qaout_request = -1) -> true;
+endmodule
+
+
+
+
+// ONE THREADS FOR BOTH COMPONENTS!
+module Thread1
+t1_component : [0..2] init 0; // 0 is unassigned, 1 is component A, 2 is component B
+t1_init_A : [0..2] init 0; // 1 set basic values, 2 apply modifiers
+t1_init_B : [0..2] init 0;
+t1_request : [-1..SIMULATION_LENGTH_IN_MICROSECONDS] init -1;
+
+t1_demandPerMicrosecond : [0..100] init 0;
+t1_demandTotalRemaining : [0..max(DEMAND_PERCENT_A*BASE_PROCESSING_TIME_MICROSECOND_A, DEMAND_PERCENT_B*BASE_PROCESSING_TIME_MICROSECOND_B)] init 0; // TODO INCREASE!!!!!!
+
+// INPUT A
+[] t1_component = 0 & qaout_request != -1 & !THREAD_TOOK_INPUT_A & activeThreadsA < THREADPOOLSIZEA -> (t1_component' = 1) & (t1_request' = qaout_request) & (THREAD_TOOK_INPUT_A' = true) & (t1_init_A' = 1) & (activeThreadsA' = activeThreadsA +1);
+[] t1_init_A = 1 -> (t1_demandPerMicrosecond' = DEMAND_PERCENT_A) & (t1_demandTotalRemaining' = DEMAND_PERCENT_A * BASE_PROCESSING_TIME_MICROSECOND_A) & (t1_init_A' = 2) & (total_demand_percent' = total_demand_percent + DEMAND_PERCENT_A);
+[] t1_init_A = 2 -> EASY_TASK_PROBABILITY_A : (t1_demandTotalRemaining' = ceil(t1_demandTotalRemaining * EASY_TASK_MODIFIER_A)) & (t1_init_A' = 0) + DIFFICULT_TASK_PROBABILITY_A : (t1_demandTotalRemaining' = ceil(t1_demandTotalRemaining * DIFFICULT_TASK_MODIFIER_A)) & (t1_init_A' = 0) + (1-DIFFICULT_TASK_PROBABILITY_A-EASY_TASK_PROBABILITY_A) : (t1_init_A' = 0);
+// INPUT B TODO!
+
+// FINISHED HANDLING
+[] t1_component = 1 & t1_init_A = 0 & t1_demandTotalRemaining = 0 -> (requestFinishedA'=t1_request) & (t1_request'=-1) & (t1_component'=0) & (t1_demandPerMicrosecond'=0) & (t1_demandTotalRemaining'=0) & (activeThreadsA'=activeThreadsA-1) & (total_demand_percent'=total_demand_percent-t1_demandPerMicrosecond);
+[] t1_component = 2 & t1_init_B = 0 & t1_demandTotalRemaining = 0 -> (requestFinishedB'=t1_request) & (t1_request'=-1) & (t1_component'=0) & (t1_demandPerMicrosecond'=0) & (t1_demandTotalRemaining'=0) & (activeThreadsB'=activeThreadsA-1) & (total_demand_percent'=total_demand_percent-t1_demandPerMicrosecond);
+
+// COMPUTE
+[endRound] t1_init_A = 0 & t1_init_B = 0 & !(t1_component != 0 & t1_demandTotalRemaining = 0) -> (t1_demandTotalRemaining' = max(t1_demandTotalRemaining - max(floor(pow(MANY_THREADS_PENALTY, activeThreadsA+activeThreadsB-1) * min(MAX_AVAILABLE_DEMAND_PERCENT/total_demand_percent,1) * t1_demandPerMicrosecond),1),0));
+endmodule
+
+//module Thread2 = Thread1 [t1_component = t2_component, t1_init_A = t2_init_A, t1_init_B = t2_init_B, t1_request = t2_request, t1_demandPerMicrosecond = t2_demandPerMicrosecond, t1_demandTotalRemaining = t2_demandTotalRemaining] endmodule
+//module Thread3 = Thread1 [t1_component = t3_component, t1_init_A = t3_init_A, t1_init_B = t3_init_B, t1_request = t3_request, t1_demandPerMicrosecond = t3_demandPerMicrosecond, t1_demandTotalRemaining = t3_demandTotalRemaining] endmodule
+
+// COPY THREADS and COMPONENTB
